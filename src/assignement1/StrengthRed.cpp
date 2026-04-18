@@ -12,7 +12,7 @@ namespace {
 // --------------------------------------------------------------------------
 // Funzione helper: restituisce log2(k) se k è potenza di 2, altrimenti -1
 // --------------------------------------------------------------------------
-static int getLog2IfPowerOf2(ConstantInt* CI) {
+static inline int getLog2IfPowerOf2(ConstantInt* CI) {
     return CI->getValue().exactLogBase2();
 }
 
