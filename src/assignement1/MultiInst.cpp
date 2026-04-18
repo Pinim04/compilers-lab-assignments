@@ -11,68 +11,6 @@ namespace {
 // New PM implementation
 struct MultiInst : PassInfoMixin<MultiInst>
 {
-    // Main entry point, takes IR unit to run the pass on (&F) and the
-    // corresponding pass manager (to be queried if need be)
-    // PreservedAnalyses run(Function& F, FunctionAnalysisManager&) {
-    //     bool changed = false;
-
-    //     for (auto Iter = F.begin(); Iter != F.end(); ++Iter) {
-    //         BasicBlock& B = *Iter;
-
-    //         for (Instruction& inst : llvm::make_early_inc_range(B)) {
-    //             if (BinaryOperator* firstInst = dyn_cast<BinaryOperator>(&inst)) {
-    //                 auto Ty = firstInst->getType();
-
-    //                 if (firstInst->getOpcode() == llvm::Instruction::Add ||
-    //                     firstInst->getOpcode() == llvm::Instruction::Sub) {
-    //                     for (Use& fisrtInstUse : llvm::make_early_inc_range(firstInst->uses())) {
-    //                         // Get the instruction that is using your value
-    //                         User* user = fisrtInstUse.getUser();
-
-    //                         // Get the specific operand number where your value sits
-    //                         unsigned OperandNo = fisrtInstUse.getOperandNo();
-
-    //                         // Only check for BinaryOperator users
-    //                         if (auto* sndInst = dyn_cast<BinaryOperator>(user)) {
-    //                             outs() << "I am operand number " << OperandNo
-    //                                    << " in the instruction: " << *sndInst << "\n";
-
-    //                             if (sndInst->getOpcode() == llvm::Instruction::Add ||
-    //                                 sndInst->getOpcode() == llvm::Instruction::Sub) {
-    //                                 // get the other operand of the second instruction
-    //                                 Value* sndInstOtherOp = sndInst->getOperand(1 - OperandNo);
-
-    //                                 // Is the second inst opposite of the first one? (Add vs Sub)
-    //                                 if (sndInst->getOpcode() != firstInst->getOpcode()) {
-    //                                     outs() << "I am the opposite of the first instruction"
-    //                                            << *sndInstOtherOp << "\n";
-
-    //                                     if (sndInstOtherOp == firstInst->getOperand(0)) {
-    //                                         // Replace all uses
-    //                                         sndInst->replaceAllUsesWith(firstInst->getOperand(1));
-    //                                         sndInst->eraseFromParent();
-
-    //                                         changed = true;
-    //                                     }
-
-    //                                     if (sndInstOtherOp == firstInst->getOperand(1)) {
-    //                                         // Replace all uses
-    //                                         sndInst->replaceAllUsesWith(firstInst->getOperand(0));
-    //                                         sndInst->eraseFromParent();
-
-    //                                         changed = true;
-    //                                     }
-    //                                 }
-    //                             }
-    //                         }
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //     }
-    //     return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
-    // }
-
     PreservedAnalyses run(Function& F, FunctionAnalysisManager&) {
         bool changed = false;
 
@@ -91,7 +29,8 @@ struct MultiInst : PassInfoMixin<MultiInst>
                     if (auto* prevInsst = dyn_cast<BinaryOperator>(leftOp)) {
                         if (prevInsst->getOpcode() == Instruction::Add) {
 
-                            // find the operand to remove
+                            // Find the operand to remove and replace the instruction with value
+                            // that doesn't cancel out
                             if (prevInsst->getOperand(1) == rightOp) {
                                 binOp->replaceAllUsesWith(prevInsst->getOperand(0));
                                 binOp->eraseFromParent();
@@ -112,19 +51,17 @@ struct MultiInst : PassInfoMixin<MultiInst>
                 else if (binOp->getOpcode() == Instruction::Add) {
                     // Addition is commutative, so the subtraction could be on the left OR right
                     for (int i = 0; i < 2; ++i) {
-                        Value* possibleSub = binOp->getOperand(i);
-                        Value* theY = binOp->getOperand(1 - i);
+                        Value* leftOp = binOp->getOperand(i);
+                        Value* rightOp = binOp->getOperand(1 - i);
 
-                        if (auto* innerSub = dyn_cast<BinaryOperator>(possibleSub)) {
+                        if (auto* innerSub = dyn_cast<BinaryOperator>(leftOp)) {
                             if (innerSub->getOpcode() == Instruction::Sub) {
 
-                                // Check: (X - Y) + Y -> Replace with X
-                                if (innerSub->getOperand(1) == theY) {
-                                    outs() << "Optimizing (X - Y) + Y -> X\n";
+                                if (innerSub->getOperand(1) == rightOp) {
                                     binOp->replaceAllUsesWith(innerSub->getOperand(0));
                                     binOp->eraseFromParent();
                                     changed = true;
-                                    break; // Break the 'i' loop since we deleted the instruction
+                                    break; // Found the right inst, don't check the other operand
                                 }
                             }
                         }

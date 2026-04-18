@@ -7,23 +7,25 @@
 
 using namespace llvm;
 
-// ─────────────────────────────────────────────────────────────────────────────
+namespace {
+
+// --------------------------------------------------------------------------
 // Funzione helper: restituisce log2(k) se k è potenza di 2, altrimenti -1
-// ─────────────────────────────────────────────────────────────────────────────
+// --------------------------------------------------------------------------
 static int getLog2IfPowerOf2(ConstantInt* CI) {
     return CI->getValue().exactLogBase2();
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// --------------------------------------------------------------------------
 // Logica principale: scorre le istruzioni del BasicBlock
-// ─────────────────────────────────────────────────────────────────────────────
+// --------------------------------------------------------------------------
 bool runOnBasicBlock(BasicBlock& B) {
     bool changed = false;
 
     for (auto iter = B.begin(); iter != B.end();) {
         Instruction& I = *iter++;
 
-        // ── MOLTIPLICAZIONE ──────────────────────────────────────────────────
+        // -- MOLTIPLICAZIONE -------------------------------------------------
         if (I.getOpcode() == Instruction::Mul) {
             Value* op0 = I.getOperand(0);
             Value* op1 = I.getOperand(1);
@@ -93,7 +95,7 @@ bool runOnBasicBlock(BasicBlock& B) {
                 }
             }
 
-            // ── DIVISIONE ────────────────────────────────────────────────────────
+            // -- DIVISIONE -------------------------------------------------
         } else if (I.getOpcode() == Instruction::UDiv || I.getOpcode() == Instruction::SDiv) {
 
             ConstantInt* CI = dyn_cast<ConstantInt>(I.getOperand(1));
@@ -124,11 +126,7 @@ bool runOnBasicBlock(BasicBlock& B) {
     return changed;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Pass
-// ─────────────────────────────────────────────────────────────────────────────
-namespace {
-
+// New PM implementation
 struct StrengthReduction : PassInfoMixin<StrengthReduction>
 {
 
@@ -145,9 +143,9 @@ struct StrengthReduction : PassInfoMixin<StrengthReduction>
 
 } // namespace
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Registrazione
-// ─────────────────────────────────────────────────────────────────────────────
+// --------------------------------------------------------------------------
+// New PM Registration
+// --------------------------------------------------------------------------
 llvm::PassPluginLibraryInfo getStrengthReductionPluginInfo() {
     return { LLVM_PLUGIN_API_VERSION,
              "StrengthReduction",
@@ -165,6 +163,9 @@ llvm::PassPluginLibraryInfo getStrengthReductionPluginInfo() {
              } };
 }
 
+// This is the core interface for pass plugins. It guarantees that 'opt' will
+// be able to recognize MultiInst when added to the pass pipeline on the
+// command line, i.e. via '-passes=test-pass'
 extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo llvmGetPassPluginInfo() {
     return getStrengthReductionPluginInfo();
 }
