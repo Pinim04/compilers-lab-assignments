@@ -9,163 +9,158 @@ using namespace llvm;
 
 namespace {
 
-// --------------------------------------------------------------------------
-// Funzione helper: restituisce log2(k) se k è potenza di 2, altrimenti -1
-// --------------------------------------------------------------------------
-static inline int getLog2IfPowerOf2(ConstantInt* CI) {
-    return CI->getValue().exactLogBase2();
+int checkShift(ConstantInt* x, uint64_t& ShiftAmt) {
+    APInt num = x->getValue();
+    if (num.isPowerOf2()) {
+        ShiftAmt = num.logBase2();
+        return 1;
+    } else if ((num + 1).isPowerOf2()) {
+        ShiftAmt = (num + 1).logBase2();
+        return 2;
+    } else if ((num - 1).isPowerOf2()) {
+        ShiftAmt = (num - 1).logBase2();
+        return 3;
+    }
+    return 0;
 }
 
-// --------------------------------------------------------------------------
-// Logica principale: scorre le istruzioni del BasicBlock
-// --------------------------------------------------------------------------
-bool runOnBasicBlock(BasicBlock& B) {
-    bool changed = false;
+bool optimizeMul(BinaryOperator* OldMul,
+                 Value* x,
+                 uint64_t num,
+                 std::vector<Instruction*>& remove,
+                 int check) {
+    Constant* ShiftAmt = ConstantInt::get(OldMul->getType(), num);
+    Instruction* Shl = BinaryOperator::Create(Instruction::Shl, x, ShiftAmt);
+    Shl->insertAfter(OldMul);
+    Instruction* FinalInst = Shl;
+    switch (check) {
+        case 1:
+            break;
 
-    for (auto iter = B.begin(); iter != B.end();) {
-        Instruction& I = *iter++;
+        case 2: {
+            Instruction* Sub =
+              BinaryOperator::Create(Instruction::Sub, Shl, ConstantInt::get(Shl->getType(), 1));
+            Sub->insertAfter(Shl);
+            FinalInst = Sub;
+            break;
+        }
+        case 3: {
+            Instruction* Add =
+              BinaryOperator::Create(Instruction::Add, Shl, ConstantInt::get(Shl->getType(), 1));
+            Add->insertAfter(Shl);
+            FinalInst = Add;
+            break;
+        }
+        default:
+            errs() << "Errore!\n";
+            return false;
+    }
+    OldMul->replaceAllUsesWith(FinalInst);
+    remove.push_back(OldMul);
+    return true;
+}
 
-        // -- MOLTIPLICAZIONE -------------------------------------------------
-        if (I.getOpcode() == Instruction::Mul) {
-            Value* op0 = I.getOperand(0);
-            Value* op1 = I.getOperand(1);
+bool optimizeDiv(BinaryOperator* OldDiv,
+                 Value* x,
+                 uint64_t num,
+                 std::vector<Instruction*>& remove) {
+    Constant* Shift = ConstantInt::get(OldDiv->getType(), num);
+    Instruction* Shr = BinaryOperator::Create(Instruction::AShr, x, Shift);
+    Shr->insertAfter(OldDiv);
+    OldDiv->replaceAllUsesWith(Shr);
+    remove.push_back(OldDiv);
+    return true;
+}
 
-            ConstantInt* constOp = nullptr;
-            Value* varOp = nullptr;
+struct StrengthRed : PassInfoMixin<StrengthRed>
+{
+    PreservedAnalyses run(Function& F, FunctionAnalysisManager&) {
+        bool Changed = false;
 
-            if (ConstantInt* CI = dyn_cast<ConstantInt>(op0)) {
-                constOp = CI;
-                varOp = op1;
-            } else if (ConstantInt* CI = dyn_cast<ConstantInt>(op1)) {
-                constOp = CI;
-                varOp = op0;
-            }
+        // Lista in cui salveremo le istruzioni da distruggere alla fine
+        std::vector<Instruction*> InstToRemove;
 
-            if (!constOp)
-                continue;
+        // Doppio ciclo per esplorare ogni istruzione di ogni blocco
+        for (BasicBlock& B : F) {
+            for (Instruction& Inst : B) {
 
-            int log2val = getLog2IfPowerOf2(constOp);
+                // È un'operazione matematica (Add, Moltiplicazione, ecc)?
+                if (auto* BinOp = dyn_cast<BinaryOperator>(&Inst)) {
+                    Value* Op0 = BinOp->getOperand(0); // Sinistra
+                    Value* Op1 = BinOp->getOperand(1); // Destra
+                    // Caso A: Trovata moltiplicazione
+                    if (BinOp->getOpcode() == Instruction::Mul) {
+                        ConstantInt* C0 = dyn_cast<ConstantInt>(Op0);
+                        ConstantInt* C1 = dyn_cast<ConstantInt>(Op1);
+                        uint64_t shift = 0;
+                        if (C0) {
+                            int x = checkShift(C0, shift);
+                            if (x != 0) {
+                                Changed = optimizeMul(BinOp, Op1, shift, InstToRemove, x);
+                                continue;
+                            }
+                        }
+                        if (C1) {
+                            int x = checkShift(C1, shift);
+                            if (x != 0) {
+                                Changed = optimizeMul(BinOp, Op0, shift, InstToRemove, x);
+                                continue;
+                            }
+                        }
+                    }
 
-            if (log2val != -1) {
-                // k è potenza di 2  →  var << log2(k)
-                outs() << "SR Mul (pot2): " << I << "\n";
-                Instruction* shl = BinaryOperator::Create(
-                  Instruction::Shl,
-                  varOp,
-                  ConstantInt::get(Type::getInt32Ty(I.getContext()), log2val),
-                  "",
-                  &I);
-                I.replaceAllUsesWith(shl);
-                I.eraseFromParent();
-                changed = true;
+                    if (BinOp->getOpcode() == Instruction::SDiv) {
+                        ConstantInt* C0 = dyn_cast<ConstantInt>(Op0);
+                        ConstantInt* C1 = dyn_cast<ConstantInt>(Op1);
+                        uint64_t shift = 0;
 
-            } else {
-                APInt incVal = constOp->getValue() + 1;
-                APInt decVal = constOp->getValue() - 1;
-                int log2inc = incVal.exactLogBase2();
-                int log2dec = decVal.exactLogBase2();
-
-                if (log2inc != -1) {
-                    // (k+1) è potenza di 2  →  (var << log2(k+1)) - var
-                    outs() << "SR Mul (k+1 pot2): " << I << "\n";
-                    Instruction* shl = BinaryOperator::Create(
-                      Instruction::Shl,
-                      varOp,
-                      ConstantInt::get(Type::getInt32Ty(I.getContext()), log2inc),
-                      "shl_tmp",
-                      &I);
-                    Instruction* sub = BinaryOperator::Create(Instruction::Sub, shl, varOp, "", &I);
-                    I.replaceAllUsesWith(sub);
-                    I.eraseFromParent();
-                    changed = true;
-
-                } else if (log2dec != -1) {
-                    // (k-1) è potenza di 2  →  (var << log2(k-1)) + var
-                    outs() << "SR Mul (k-1 pot2): " << I << "\n";
-                    Instruction* shl = BinaryOperator::Create(
-                      Instruction::Shl,
-                      varOp,
-                      ConstantInt::get(Type::getInt32Ty(I.getContext()), log2dec),
-                      "shl_tmp",
-                      &I);
-                    Instruction* add = BinaryOperator::Create(Instruction::Add, shl, varOp, "", &I);
-                    I.replaceAllUsesWith(add);
-                    I.eraseFromParent();
-                    changed = true;
+                        if (C1) {
+                            int x = checkShift(C1, shift);
+                            if (x == 1) {
+                                Changed = optimizeDiv(BinOp, Op0, shift, InstToRemove);
+                                continue;
+                            }
+                        }
+                    }
                 }
             }
-
-            // -- DIVISIONE -------------------------------------------------
-        } else if (I.getOpcode() == Instruction::UDiv || I.getOpcode() == Instruction::SDiv) {
-
-            ConstantInt* CI = dyn_cast<ConstantInt>(I.getOperand(1));
-            if (!CI)
-                continue;
-
-            int log2val = getLog2IfPowerOf2(CI);
-            if (log2val == -1)
-                continue;
-
-            outs() << "SR Div (pot2): " << I << "\n";
-
-            // UDiv → LShr (logico),  SDiv → AShr (aritmetico)
-            Instruction::BinaryOps shiftOp =
-              (I.getOpcode() == Instruction::UDiv) ? Instruction::LShr : Instruction::AShr;
-            Instruction* shr =
-              BinaryOperator::Create(shiftOp,
-                                     I.getOperand(0),
-                                     ConstantInt::get(Type::getInt32Ty(I.getContext()), log2val),
-                                     "",
-                                     &I);
-            I.replaceAllUsesWith(shr);
-            I.eraseFromParent();
-            changed = true;
         }
+        // Eliminiamo fisicamente le vecchie istruzioni
+        for (Instruction* I : InstToRemove) {
+            I->eraseFromParent();
+        }
+
+        // Comunichiamo a LLVM se abbiamo modificato il codice o no
+        if (Changed) {
+            return PreservedAnalyses::none();
+        }
+
+        return PreservedAnalyses::all();
     }
-
-    return changed;
-}
-
-// New PM implementation
-struct StrengthReduction : PassInfoMixin<StrengthReduction>
-{
-
-    PreservedAnalyses run(Function& F, FunctionAnalysisManager&) {
-        bool changed = false;
-        for (BasicBlock& B : F)
-            if (runOnBasicBlock(B))
-                changed = true;
-        return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
-    }
-
     static bool isRequired() { return true; }
 };
-
 } // namespace
 
 // --------------------------------------------------------------------------
 // New PM Registration
 // --------------------------------------------------------------------------
-llvm::PassPluginLibraryInfo getStrengthReductionPluginInfo() {
-    return { LLVM_PLUGIN_API_VERSION,
-             "StrengthReduction",
-             LLVM_VERSION_STRING,
-             [](PassBuilder& PB) {
-                 PB.registerPipelineParsingCallback([](StringRef Name,
-                                                       FunctionPassManager& FPM,
-                                                       ArrayRef<PassBuilder::PipelineElement>) {
-                     if (Name == "strenght-red") {
-                         FPM.addPass(StrengthReduction());
-                         return true;
-                     }
-                     return false;
-                 });
-             } };
+llvm::PassPluginLibraryInfo getStrengthRedPluginInfo() {
+    return { LLVM_PLUGIN_API_VERSION, "StrengthRed", LLVM_VERSION_STRING, [](PassBuilder& PB) {
+                PB.registerPipelineParsingCallback([](StringRef Name,
+                                                      FunctionPassManager& FPM,
+                                                      ArrayRef<PassBuilder::PipelineElement>) {
+                    if (Name == "strength-red") {
+                        FPM.addPass(StrengthRed());
+                        return true;
+                    }
+                    return false;
+                });
+            } };
 }
 
 // This is the core interface for pass plugins. It guarantees that 'opt' will
 // be able to recognize MultiInst when added to the pass pipeline on the
 // command line, i.e. via '-passes=test-pass'
 extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo llvmGetPassPluginInfo() {
-    return getStrengthReductionPluginInfo();
+    return getStrengthRedPluginInfo();
 }
