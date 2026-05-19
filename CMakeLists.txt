@@ -34,3 +34,5 @@ endif()
 # 3. ASSIGNMENTS
 #===============================================================================
 add_subdirectory(src/assignement1)
+# add_subdirectory(src/assignement2)
+add_subdirectory(src/assignement3)
