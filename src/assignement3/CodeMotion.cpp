@@ -185,8 +185,18 @@ struct CodeMotionPass : PassInfoMixin<CodeMotionPass>
 
             std::vector<Instruction*> Candidates;
 
-            for (BasicBlock* BB : L->blocks()) {
+            // i blocchi "Definizione" devono essere visitati
+            // prima dei blocchi "Uso".
+            DomTreeNode* HeaderNode = DT.getNode(L->getHeader());
+            for (auto* Node : depth_first(HeaderNode)) {
+                BasicBlock* BB = Node->getBlock();
                 for (Instruction& I : *BB) {
+
+                    // skip BB degli inner loops:
+                    // sono già stati processati (postorder)
+                    if (LI.getLoopFor(BB) != L) {
+                        continue;
+                    }
 
                     // Inst come branch, return ecc non le consideriamo
                     if (I.isTerminator())
