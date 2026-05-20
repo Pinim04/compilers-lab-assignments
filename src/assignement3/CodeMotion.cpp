@@ -13,6 +13,14 @@ struct CodeMotionPass : PassInfoMixin<CodeMotionPass>
 {
     std::set<Instruction*> Visited;
 
+    // estrazione dei loop in postorder
+    void getLoopsPostorder(Loop* L, std::vector<Loop*>& PostOrderLoops) {
+        for (Loop* SubLoop : *L) {
+            getLoopsPostorder(SubLoop, PostOrderLoops);
+        }
+        PostOrderLoops.push_back(L);
+    }
+
     // LOOP INVARIANT
     // =========================================================
     //
@@ -163,7 +171,16 @@ struct CodeMotionPass : PassInfoMixin<CodeMotionPass>
             return analysisRes;
         }
 
-        for (Loop* L : LI.getLoopsInPreorder()) {
+        std::vector<Loop*> PostOrderLoops;
+        // LI itera sui loop "top-level" (quelli più esterni).
+        // Per ogni top-level loop, raccogliamo i suoi sotto-loop in postorder
+        for (Loop* TopLevelLoop : LI) {
+            getLoopsPostorder(TopLevelLoop, PostOrderLoops);
+        }
+
+        // Ora iteriamo sui loop raccolti in ordine postorder
+        for (Loop* L : PostOrderLoops) {
+
             errs() << "\nAnalisi Loop\n";
 
             std::vector<Instruction*> Candidates;
