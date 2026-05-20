@@ -136,14 +136,13 @@ struct CodeMotionPass : PassInfoMixin<CodeMotionPass>
     // Se non domina --> esiste un cammino verso l'uso che non
     // passa per la definizione --> spostare cambierebbe la semantica.
     bool dominatesAllUsesInLoop(Instruction* I, Loop* L, DominatorTree& DT) {
-        BasicBlock* DefBB = I->getParent();
-
-        for (User* U : I->users()) {
-            if (auto* UseInst = dyn_cast<Instruction>(U)) {
+        for (auto& U : I->uses()) {
+            if (auto* UseInst = dyn_cast<Instruction>(U.getUser())) {
                 if (L->contains(UseInst->getParent())) {
-                    BasicBlock* UseBB = UseInst->getParent();
 
-                    if (!DT.dominates(DefBB, UseBB)) {
+                    // qui controlliamo direttamente I e U invece dei relativi BB
+                    // così che il DT possa gestire i casi particolari come i PHI
+                    if (!DT.dominates(I, U)) {
                         return false;
                     }
                 }
