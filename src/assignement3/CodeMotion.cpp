@@ -23,18 +23,18 @@ struct CodeMotionPass : PassInfoMixin<CodeMotionPass>
     bool isOpLoopInvariant(Value* Op, Loop* L) {
         // const
         if (Constant* C = dyn_cast<Constant>(Op)) {
-            outs() << "Found loop invariant constant: " << *C << "\n";
+            errs() << "Found loop invariant constant: " << *C << "\n";
             return true;
         }
         if (Argument* A = dyn_cast<Argument>(Op)) {
-            outs() << "Found loop invariant argument: " << *A << "\n";
+            errs() << "Found loop invariant argument: " << *A << "\n";
             return true;
         }
 
         if (Instruction* OpInst = dyn_cast<Instruction>(Op)) {
             // def fuori
             if (!L->contains(OpInst->getParent())) {
-                outs() << "Function defined outside loop: " << OpInst->getName() << "\n";
+                errs() << "Function defined outside loop: " << OpInst->getName() << "\n";
                 return true;
             }
             // def dentro: check ricorsivo
@@ -207,7 +207,11 @@ struct CodeMotionPass : PassInfoMixin<CodeMotionPass>
 
             // Sposta i candidati nel preheader
             BasicBlock* Preheader = L->getLoopPreheader();
-            if (Preheader && !Candidates.empty()) {
+            if (!Preheader) {
+                errs() << "Loop senza preheader, non posso spostare. Run loop-simplify\n";
+                continue;
+            }
+            if (!Candidates.empty()) {
                 for (Instruction* I : Candidates) {
                     errs() << "\nSposto nel preheader: " << *I << "\n";
                     I->moveBefore(Preheader->getTerminator());
