@@ -33,6 +33,6 @@ endif()
 #===============================================================================
 # 3. ASSIGNMENTS
 #===============================================================================
-add_subdirectory(src/assignement1)
-# add_subdirectory(src/assignement2)
-add_subdirectory(src/assignement3)
+add_subdirectory(src/assignment1)
+# add_subdirectory(src/assignment2)
+add_subdirectory(src/assignment3)
