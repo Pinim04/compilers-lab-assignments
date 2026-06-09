@@ -183,6 +183,13 @@ struct CodeMotionPass : PassInfoMixin<CodeMotionPass>
 
             errs() << "\nAnalisi Loop\n";
 
+            if (L->isLoopSimplifyForm()) {
+                errs() << "Loop in forma semplificata\n";
+            } else {
+                errs() << "Loop non in forma semplificata, run loop-simplify\n";
+                continue;
+            }
+
             std::vector<Instruction*> Candidates;
 
             // i blocchi "Definizione" devono essere visitati
