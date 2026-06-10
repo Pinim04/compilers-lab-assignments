@@ -1,13 +1,13 @@
 #include "llvm/Analysis/DependenceAnalysis.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/PostDominators.h"
+#include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Dominators.h"
+#include "llvm/IR/Instruction.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
 #include "llvm/Support/raw_ostream.h"
-#include <llvm-19/llvm/IR/Instruction.h>
-#include <llvm/IR/Analysis.h>
 
 using namespace llvm;
 
@@ -18,14 +18,29 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
         BranchInst* G1 = L1->getLoopGuardBranch();
 
         if (!G0 && !G1) {
+            errs() << "Check adiacenza: entrambi non-guarded\n";
             // entrambi non-guarded: exit(L0) == preheader(L1)
             BasicBlock* ExitL0 = L0->getExitBlock();
+
+            errs() << "Exit block di L0: " << *ExitL0 << "\n";
             if (!ExitL0)
                 return false; // uscite multiple
-            return ExitL0 == L1->getLoopPreheader();
+
+            BasicBlock* HeaderL1 = L1->getLoopPreheader();
+            if (!HeaderL1) {
+                errs() << "Header block di L1: " << *HeaderL1 << "\n";
+                HeaderL1 =
+                  L1->getHeader(); // fallback: se non c'è preheader, header fa da preheader
+                errs() << "Header block di L1 (fallback): " << *HeaderL1 << "\n";
+            }
+
+            errs() << "Header block di L1 (finale): " << *HeaderL1 << "\n";
+
+            return ExitL0 == HeaderL1;
         }
 
         if (G0 && G1) {
+            errs() << "Check adiacenza: entrambi guarded\n";
             // entrambi guarded:bypass del guard di L0 == guard block di L1
             BasicBlock* FalseSucc = G0->getSuccessor(1);
             return FalseSucc == G1->getParent();
@@ -86,19 +101,25 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
                             continue;
 
                         // RAR: mai problematico, skip
-                        if (!I0.mayWriteToMemory() && !I1.mayWriteToMemory())
+                        if (!I0.mayWriteToMemory() && !I1.mayWriteToMemory()) {
+                            errs() << "RAR: " << I0 << " <-> " << I1 << "\n";
                             continue;
+                        }
 
                         // Primo filtro: esiste una dipendenza?
                         auto Dep = DI.depends(&I0, &I1, true);
-                        if (!Dep)
+                        if (!Dep) {
+                            errs() << "No dependence: " << I0 << " <-> " << I1 << "\n";
                             continue;
+                        }
 
                         // Secondo filtro: calcola la distanza con SCEV
                         Value* Ptr0 = getLoadStorePointerOperand(&I0);
                         Value* Ptr1 = getLoadStorePointerOperand(&I1);
-                        if (!Ptr0 || !Ptr1)
+                        if (!Ptr0 || !Ptr1) {
+                            errs() << "No pointer operands: " << I0 << " <-> " << I1 << "\n";
                             continue;
+                        }
 
                         const SCEV* S0 = SE.getSCEVAtScope(Ptr0, L0);
                         const SCEV* S1 = SE.getSCEVAtScope(Ptr1, L1);
@@ -106,12 +127,17 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
                         const SCEV* Dist = SE.getMinusSCEV(S0, S1);
 
                         // controlla che SCEV trovi effettivamente una soluzione
-                        if (dyn_cast<SCEVCouldNotCompute>(Dist))
+                        if (dyn_cast<SCEVCouldNotCompute>(Dist)) {
+                            errs() << "Could not compute distance: " << I0 << " <-> " << I1 << "\n";
                             return true;
+                        }
 
                         // c'è una dipendenza a distanza negativa
-                        if (SE.isKnownNegative(Dist))
+                        if (SE.isKnownNegative(Dist)) {
+                            errs()
+                              << "Negative distance dependence: " << I0 << " <-> " << I1 << "\n";
                             return true;
+                        }
                     }
                 }
             }
@@ -135,30 +161,35 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
         PostDominatorTree& PDT = AM.getResult<PostDominatorTreeAnalysis>(F);
         DependenceInfo& DI = AM.getResult<DependenceAnalysis>(F);
         ScalarEvolution& SE = AM.getResult<ScalarEvolutionAnalysis>(F);
-
-        PreservedAnalyses analysisRes = PreservedAnalyses::all();
-
-        errs() << "Analizzo la funzione: " << F.getName() << "\n";
+        errs() << "\nAnalizzo la funzione: " << F.getName();
 
         if (LI.empty()) {
             errs() << "Nessun loop trovato\n";
-            return analysisRes;
         }
 
         SmallVector<Loop*, 8> innerLoops;
 
         for (Loop* loop : LI)
-            for (Loop* L : depth_first(loop))
+            for (Loop* L : post_order(loop))
                 // We only handle inner-most loops.
                 if (L->isInnermost())
                     innerLoops.push_back(L);
 
-        // Ora iteriamo sui loop raccolti in ordine postorder
-        for (size_t i = 0; i < innerLoops.size() - 1; i++) {
+        DenseMap<BasicBlock*, unsigned> BBOrder;
+
+        unsigned idx = 0;
+        for (BasicBlock& BB : F)
+            BBOrder[&BB] = idx++;
+
+        llvm::sort(innerLoops, [&](Loop* A, Loop* B) {
+            return BBOrder[A->getHeader()] < BBOrder[B->getHeader()];
+        });
+
+        for (int i = 0; i < (int)innerLoops.size() - 1; i++) {
             Loop* L0 = innerLoops[i];
             Loop* L1 = innerLoops[i + 1];
 
-            errs() << "\nAnalisi Loop" << i << " e " << i + 1 << "\n";
+            errs() << "\nAnalisi Loop " << i << " e " << i + 1 << "\n";
 
             // controlla che i 2 loop siano in simplify form
             if (!checkLoopSimplifyForm(L0))
@@ -191,8 +222,10 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
             errs() << "Loop " << i << " e " << i + 1 << " possono essere fusi!\n";
         }
 
-        return PreservedAnalyses::all();
+        return PreservedAnalyses::none();
     }
+
+    static bool isRequired() { return true; }
 };
 
 // Registrazione
@@ -201,7 +234,7 @@ extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo llvmGetPassPluginIn
                 PB.registerPipelineParsingCallback([](StringRef Name,
                                                       FunctionPassManager& FPM,
                                                       ArrayRef<PassBuilder::PipelineElement>) {
-                    if (Name == "loop-fusion") {
+                    if (Name == "my-loop-fusion") {
                         FPM.addPass(LoopFusionPass());
                         return true;
                     }
