@@ -38,15 +38,13 @@ bool optimizeMul(BinaryOperator* OldMul,
             break;
 
         case 2: {
-            Instruction* Sub =
-              BinaryOperator::Create(Instruction::Sub, Shl, ConstantInt::get(Shl->getType(), 1));
+            Instruction* Sub = BinaryOperator::Create(Instruction::Sub, Shl, x);
             Sub->insertAfter(Shl);
             FinalInst = Sub;
             break;
         }
         case 3: {
-            Instruction* Add =
-              BinaryOperator::Create(Instruction::Add, Shl, ConstantInt::get(Shl->getType(), 1));
+            Instruction* Add = BinaryOperator::Create(Instruction::Add, Shl, x);
             Add->insertAfter(Shl);
             FinalInst = Add;
             break;
