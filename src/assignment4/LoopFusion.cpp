@@ -20,7 +20,7 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
     // Controlla che il blocco contenga solo istruzioni di controllo di flusso
     bool isBlockEmpty(BasicBlock* BB) {
         for (Instruction& I : *BB) {
-            if (isa<PHINode>(&I) || I.isTerminator())
+            if (isa<ICmpInst>(&I) || isa<PHINode>(&I) || I.isTerminator())
                 continue;
             return false;
         }
@@ -30,6 +30,18 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
     bool areAdjacent(Loop* L0, Loop* L1) {
         BranchInst* G0 = L0->getLoopGuardBranch();
         BranchInst* G1 = L1->getLoopGuardBranch();
+
+        errs() << "Check adiacenza:\n";
+        if (G0) {
+            errs() << "L0 è guarded, guard block: " << *G0->getParent() << "\n";
+        } else {
+            errs() << "L0 non è guarded\n";
+        }
+        if (G1) {
+            errs() << "L1 è guarded, guard block: " << *G1->getParent() << "\n";
+        } else {
+            errs() << "L1 non è guarded\n";
+        }
 
         if (!G0 && !G1) {
             errs() << "Check adiacenza: entrambi non-guarded\n";
@@ -61,9 +73,34 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
 
         if (G0 && G1) {
             errs() << "Check adiacenza: entrambi guarded\n";
-            // entrambi guarded:bypass del guard di L0 == guard block di L1
-            BasicBlock* FalseSucc = G0->getSuccessor(1);
-            return FalseSucc == G1->getParent();
+            BasicBlock* GB1 = G1->getParent();
+            BasicBlock* FalseSucc = G0->getSuccessor(1); // bypass
+
+            errs() << "Guard block di L1: " << *GB1 << "\n";
+            errs() << "Bypass di G0: " << *FalseSucc << "\n";
+
+            // bypass del guard di L0 == guard block di L1
+            if (FalseSucc == GB1) {
+                // Anche l'uscita normale del Loop 0 deve arrivare pulita a L1
+                BasicBlock* ExitL0 = L0->getExitBlock();
+                if (ExitL0 && ExitL0->getSingleSuccessor() == GB1) {
+                    return isBlockEmpty(ExitL0) && isBlockEmpty(GB1);
+                }
+                return false;
+            }
+
+            // bypass passa per un blocco intermedio prima di GB1
+            if (FalseSucc->getSingleSuccessor() == GB1) {
+                if (!isBlockEmpty(FalseSucc))
+                    return false;
+
+                BasicBlock* ExitL0 = L0->getExitBlock();
+                if (ExitL0 && ExitL0->getSingleSuccessor() == GB1) {
+                    return isBlockEmpty(ExitL0);
+                }
+                return false;
+            }
+            return false;
         }
 
         return false;
@@ -72,17 +109,6 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
     bool isCFEquivalent(Loop* L0, Loop* L1, DominatorTree& DT, PostDominatorTree& PDT) {
         BranchInst* G0 = L0->getLoopGuardBranch();
         BranchInst* G1 = L1->getLoopGuardBranch();
-
-        if (G0) {
-            errs() << "Guard block di L0: " << *G0->getParent() << "\n";
-        } else {
-            errs() << "L0 non guarded\n";
-        }
-        if (G1) {
-            errs() << "Guard block di L1: " << *G1->getParent() << "\n";
-        } else {
-            errs() << "L1 non guarded\n";
-        }
 
         if (!G0 && !G1) {
             BasicBlock* H0 = L0->getHeader();
