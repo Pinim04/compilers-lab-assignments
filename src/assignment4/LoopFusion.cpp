@@ -8,6 +8,10 @@
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Analysis/ValueTracking.h"
+#include <llvm/IR/BasicBlock.h>
+#include <llvm/IR/Instructions.h>
+#include <llvm/Support/Casting.h>
 
 using namespace llvm;
 
@@ -22,10 +26,10 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
             // entrambi non-guarded: exit(L0) == preheader(L1)
             BasicBlock* ExitL0 = L0->getExitBlock();
 
-            errs() << "Exit block di L0: " << *ExitL0 << "\n";
             if (!ExitL0)
                 return false; // uscite multiple
 
+            errs() << "Exit block di L0: " << *ExitL0 << "\n";
             BasicBlock* HeaderL1 = L1->getLoopPreheader();
             if (!HeaderL1) {
                 errs() << "Header block di L1: " << *HeaderL1 << "\n";
@@ -36,7 +40,31 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
 
             errs() << "Header block di L1 (finale): " << *HeaderL1 << "\n";
 
-            return ExitL0 == HeaderL1;
+            // Se i blocchi non coincidono, non sono adiacenti
+            if (ExitL0 != HeaderL1){ 
+                errs() << "Exit di L0 e header di L1 non coincidono\n";
+                return false;
+            }
+
+            // FIX ERRORE 1: Verifichiamo che non ci siano istruzioni in mezzo!
+            for (Instruction &I : *ExitL0) {
+                // I nodi PHI sono innocui, servono solo a LLVM
+                if (dyn_cast<PHINode>(&I)){
+                    continue;
+                }
+
+                // L'istruzione di branch finale è necessaria
+                if (I.isTerminator()){
+                    continue;
+                }
+                
+                // Se troviamo QUALSIASI altra istruzione (es. call, store, add), 
+                // c'è del codice in mezzo!
+                errs() << "Trovata istruzione in mezzo ai loop: " << I << "\n";
+                return false;
+            }
+
+            return true;
         }
 
         if (G0 && G1) {
@@ -53,6 +81,17 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
         BranchInst* G0 = L0->getLoopGuardBranch();
         BranchInst* G1 = L1->getLoopGuardBranch();
 
+        if(G0){
+            errs() << "Guard block di L0: " << *G0->getParent() << "\n";
+        }else {
+            errs() << "L0 non guarded\n";
+        }
+        if(G1){
+            errs() << "Guard block di L1: " << *G1->getParent() << "\n";
+        }else {
+            errs() << "L1 non guarded\n";
+        }
+        
         if (!G0 && !G1) {
             BasicBlock* H0 = L0->getHeader();
             BasicBlock* H1 = L1->getHeader();
@@ -92,13 +131,15 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
 
         for (BasicBlock* BB0 : L0->getBlocks()) {
             for (Instruction& I0 : *BB0) {
-                if (!I0.mayReadOrWriteMemory())
+                if (!I0.mayReadOrWriteMemory()){
                     continue;
+                }
 
                 for (BasicBlock* BB1 : L1->getBlocks()) {
                     for (Instruction& I1 : *BB1) {
-                        if (!I1.mayReadOrWriteMemory())
+                        if (!I1.mayReadOrWriteMemory()){
                             continue;
+                        }
 
                         // RAR: mai problematico, skip
                         if (!I0.mayWriteToMemory() && !I1.mayWriteToMemory()) {
@@ -116,27 +157,57 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
                         // Secondo filtro: calcola la distanza con SCEV
                         Value* Ptr0 = getLoadStorePointerOperand(&I0);
                         Value* Ptr1 = getLoadStorePointerOperand(&I1);
+                        
                         if (!Ptr0 || !Ptr1) {
                             errs() << "No pointer operands: " << I0 << " <-> " << I1 << "\n";
                             continue;
                         }
 
-                        const SCEV* S0 = SE.getSCEVAtScope(Ptr0, L0);
-                        const SCEV* S1 = SE.getSCEVAtScope(Ptr1, L1);
-
-                        const SCEV* Dist = SE.getMinusSCEV(S0, S1);
-
-                        // controlla che SCEV trovi effettivamente una soluzione
-                        if (dyn_cast<SCEVCouldNotCompute>(Dist)) {
-                            errs() << "Could not compute distance: " << I0 << " <-> " << I1 << "\n";
-                            return true;
+                        // Questa funzione ignora tutti i calcoli matematici e 
+                        // risale fino a trovare l'allocazione originale (la radice, come int a[100]).
+                        if (getUnderlyingObject(Ptr0) != getUnderlyingObject(Ptr1)) {
+                            continue; // puntano a oggetti diversi, non c'è dipendenza reale
                         }
 
-                        // c'è una dipendenza a distanza negativa
+                        // 3. LA FORMULA: Prendiamo la formula di accesso a memoria di entrambi i puntatori,
+                        ///SCEV vede un'equazione chiamata AddRecurrence: {BaseAddress, +, 4}
+                        const SCEV* S0 = SE.getSCEVAtScope(Ptr0, L0);
+                        const SCEV* S1 = SE.getSCEVAtScope(Ptr1, L1);
+                        
+                        // Se SCEV non riesce a trovare una formula (es. per accessi dinamici), blocchiamo la fusione per sicurezza
+                        //dyn_cast prova a convertire l'oggetto S0 (che è una formula generica) in un SCEVAddRecExpr, ovvero una formula strettamente lineare che avanza di un passo costante.
+                        //Se un loop accede alla memoria in modo casuale o non prevedibile (es. a[rand()] o tramite l'uso di un array di indici a[c[i]]), SCEV non genera un AddRecExpr.
+                        const SCEVAddRecExpr* AR0 = dyn_cast<SCEVAddRecExpr>(S0);
+                        const SCEVAddRecExpr* AR1 = dyn_cast<SCEVAddRecExpr>(S1);
+                        
+                        if (!AR0 || !AR1) {
+                            errs() << "Formule non lineari, abortisco fusione per sicurezza.\n";
+                            return true; 
+                        }
+                        
+                        // 4. LO STOREREWRITTEN (SLIDE 23): La magia.
+                        // Prendiamo gli operandi (Partenza e Step) dalla formula del Loop 0...
+                        //Con Ops(AR0->operands()) stiamo "smontando" l'equazione del Loop 0 per prenderne i mattoncini base (il valore di partenza e l'incremento)
+                        //Con SE.getAddRecExpr(Ops, L1, ...) usiamo quei mattoncini per costruire una nuova equazione identica, 
+                        //ma dichiariamo a LLVM che vive nel Loop 1 (L1). L'abbiamo letteralmente teletrasportata. Questo è il famoso StoreRewritten.
+
+                        SmallVector<const SCEV*, 2> Ops(AR0->operands());
+                        // ... e creiamo una nuova formula piantandola nel Loop 1!
+                        const SCEV* StoreRewritten = SE.getAddRecExpr(Ops, L1, AR0->getNoWrapFlags());
+
+                        // 5. LA SOTTRAZIONE: Ora possiamo sottrarli, abitano nello stesso loop!
+                        const SCEV* Dist = SE.getMinusSCEV(StoreRewritten, S1);
+
+                        // Se SCEV va in confusione (non dovrebbe più succedere grazie allo StoreRewritten)
+                        if (dyn_cast<SCEVCouldNotCompute>(Dist)) {
+                            errs() << "Could not compute distance: " << I0 << " <-> " << I1 << "\n";
+                            return true; // Blocchiamo la fusione
+                        }
+
+                        // 6. IL VERDETTO: È negativo?
                         if (SE.isKnownNegative(Dist)) {
-                            errs()
-                              << "Negative distance dependence: " << I0 << " <-> " << I1 << "\n";
-                            return true;
+                            errs() << "Negative distance dependence TROVATA: " << I0 << " <-> " << I1 << "\n";
+                            return true; // BLOCCHIAMO LA FUSIONE!
                         }
                     }
                 }
@@ -155,28 +226,183 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
         }
     }
 
+    //=========================================================
+    // TRASFORMAZIONE
+    // Precondizione: tutte e 4 le condizioni di legalità passate
+    // =========================================================
+    // =========================================================
+    // TRASFORMAZIONE (La vera Loop Fusion geometrica)
+    // =========================================================
+    void fuseLoops(Loop* L0, Loop* L1) {
+        BasicBlock* H0 = L0->getHeader();
+        BasicBlock* Latch0 = L0->getLoopLatch();
+        BasicBlock* Exit0 = L0->getExitBlock();
+        BasicBlock* Exiting0 = L0->getExitingBlock();
+
+        BasicBlock* H1 = L1->getHeader();
+        BasicBlock* Latch1 = L1->getLoopLatch();
+        BasicBlock* Exit1 = L1->getExitBlock();
+
+        BranchInst* G0 = L0->getLoopGuardBranch();
+        BranchInst* G1 = L1->getLoopGuardBranch();
+
+        errs() << "  fuseLoops: Inizio la fusione...\n";
+
+        // 0. Unifica le variabili di induzione (RAUW)
+        //La funzione replaceAllUsesWith (spesso chiamata RAUW in gergo LLVM) prende letteralmente ogni singola istruzione nel Loop 1 che utilizzava la 
+        //variabile IV1 (%j) e la sostituisce con la variabile IV0 (%i).
+        PHINode* IV0 = L0->getCanonicalInductionVariable();
+        PHINode* IV1 = L1->getCanonicalInductionVariable();
+        if (IV0 && IV1) {
+            IV1->replaceAllUsesWith(IV0);
+        }
+
+        // Trova l'inizio del Body del Loop 1
+        BranchInst* H1Br = cast<BranchInst>(H1->getTerminator());
+        //Questa riga usa l'operatore ternario ? : di C++ per fare un test: "Chiedo a L1 se il successore 0 fa parte dei blocchi contenuti all'interno del loop (L1->contains(...)).
+        //Se sì, allora il successore 0 è l'inizio del Body. Se no, per esclusione, l'inizio del Body deve essere il successore 1".
+        BasicBlock* Body1Start = L1->contains(H1Br->getSuccessor(0)) ? H1Br->getSuccessor(0) : H1Br->getSuccessor(1);
+
+
+        // =================================================================
+        // STEP 1 (Il tuo): La branch del body di L0 punta al body di L1
+        // =================================================================
+        //Prendi tutti i blocchi che prima passavano la palla al Latch0. Guarda la loro istruzione di terminazione (il Term, che è un salto).
+        //Se vedi che questo salto sta puntando al Latch0, staccalo e devialo verso Body1Start (che abbiamo calcolato prima)".
+        SmallVector<BasicBlock*, 4> PredsOfLatch0(predecessors(Latch0));
+        for (BasicBlock* P : PredsOfLatch0) {
+            Instruction* Term = P->getTerminator();
+            for (unsigned i = 0; i < Term->getNumSuccessors(); ++i) {
+                if (Term->getSuccessor(i) == Latch0) {
+                    Term->setSuccessor(i, Body1Start);
+                }
+            }
+        }
+
+
+        // =================================================================
+        // STEP 2 (Il tuo): Il body di L1 punta al Latch di L0
+        // =================================================================
+        // Nota: usiamo il Latch di L0 perché è lì che avviene l'incremento (i++)
+        // e il ritorno a H0. Il Latch di L1 viene abbandonato.
+        //Quindi il for cerca l'uscita del Body di L1 e le dice: "Non puntare più al tuo vecchio Latch1.
+        //Punta invece al Latch0".
+        SmallVector<BasicBlock*, 4> PredsOfLatch1(predecessors(Latch1));
+        for (BasicBlock* P : PredsOfLatch1) {
+            Instruction* Term = P->getTerminator();
+            for (unsigned i = 0; i < Term->getNumSuccessors(); ++i) {
+                if (Term->getSuccessor(i) == Latch1) {
+                    Term->setSuccessor(i, Latch0);
+                }
+            }
+        }
+
+        // AGGIORNAMENTO PHI (Sicurezza LLVM): Il Latch0 prima riceveva il flusso 
+        // dal Body0, ora lo riceve dal Body1. Dobbiamo aggiornare i nodi PHI.
+        //l codice fa esattamente questo:
+            //for (PHINode &PN : Latch0->phis()): Prende ogni nodo PHI nel Latch0.
+            //getBasicBlockIndex(OldPred): Cerca in quale "slot" era salvato il vecchio blocco di provenienza (il Body di L0).
+            //PN.setIncomingBlock(idx, PredsOfLatch1[0]): Prende quello slot e ci sovrascrive il nuovo blocco di provenienza (la fine del Body di L1).
+            //Risultato: Il nodo PHI è stato "aggiornato" alla nuova topologia del grafo.
+        for (PHINode &PN : Latch0->phis()) {
+            for (BasicBlock* OldPred : PredsOfLatch0) {
+                int idx = PN.getBasicBlockIndex(OldPred);
+                // PredsOfLatch1[0] è l'ultimo blocco del body di L1.
+                if (idx >= 0 && !PredsOfLatch1.empty()) {
+                    PN.setIncomingBlock(idx, PredsOfLatch1[0]); 
+                }
+            }
+        }
+
+
+        // =================================================================
+        // STEP 3 (Il tuo): All'header di L0 facciamo puntare l'exit di L1
+        // =================================================================
+        //Questo for scansiona i salti dell'Header e dice: "Se stai cercando di saltare al vecchio spazio intermedio (Exit0),
+        // devia il salto direttamente alla vera e unica uscita del programma, ovvero l'uscita di L1 (Exit1)".
+        if (Exiting0 && Exit0 && Exit1) {
+            Instruction* Term = Exiting0->getTerminator();
+            for (unsigned i = 0; i < Term->getNumSuccessors(); ++i) {
+                if (Term->getSuccessor(i) == Exit0) {
+                    Term->setSuccessor(i, Exit1);
+                }
+            }
+            // ...
+        }
+        // AGGIORNAMENTO PHI (Sicurezza LLVM): Exit1 prima veniva raggiunto da H1. 
+        // Ora viene raggiunto da H0. Avvisiamo i nodi PHI del cambio di arco!
+        for (PHINode &PN : Exit1->phis()) {
+            int idx = PN.getBasicBlockIndex(H1);
+            if (idx >= 0) {
+                PN.setIncomingBlock(idx, H0);
+            }
+        }
+
+
+        // =================================================================
+        // STEP 4: Cablaggio delle Guardie (Solo se entrambi sono guarded)
+        // =================================================================
+        
+        if (G0 && G1) {
+            BasicBlock* G0Block = G0->getParent();
+            BasicBlock* G1Block = G1->getParent();
+            
+            // Troviamo dove punta il ramo "False" di G1 (quello che salta il loop 1)
+            BasicBlock* G1FalseDest = nullptr;
+            for (unsigned i = 0; i < G1->getNumSuccessors(); i++) {
+                if (G1->getSuccessor(i) != L1->getLoopPreheader()) {
+                    G1FalseDest = G1->getSuccessor(i);
+                    break;
+                }
+            }
+
+            if (G1FalseDest) {
+                // Modifiamo G0 in modo che il suo ramo "False" salti direttamente alla fine di G1, 
+                // scavalcando completamente G1Block.
+                for (unsigned i = 0; i < G0->getNumSuccessors(); i++) {
+                    if (G0->getSuccessor(i) == G1Block) {
+                        G0->setSuccessor(i, G1FalseDest);
+                    }
+                }
+
+                // AGGIORNAMENTO PHI (Sicurezza LLVM)
+                // Il blocco di destinazione finale ora viene raggiunto da G0Block invece che da G1Block
+                for (PHINode &PN : G1FalseDest->phis()) {
+                    int idx = PN.getBasicBlockIndex(G1Block);
+                    if (idx >= 0) {
+                        PN.setIncomingBlock(idx, G0Block);
+                    }
+                }
+            }
+            errs() << "  fuseLoops: Guardie unite con successo!\n";
+        }
+
+        errs() << "  fuseLoops: CFG ricollegato con successo! I blocchi vecchi verranno eliminati dal DCE di LLVM.\n";
+    }
+
     PreservedAnalyses run(Function& F, FunctionAnalysisManager& AM) {
-        LoopInfo& LI = AM.getResult<LoopAnalysis>(F);
-        DominatorTree& DT = AM.getResult<DominatorTreeAnalysis>(F);
+        LoopInfo&          LI  = AM.getResult<LoopAnalysis>(F);
+        DominatorTree&     DT  = AM.getResult<DominatorTreeAnalysis>(F);
         PostDominatorTree& PDT = AM.getResult<PostDominatorTreeAnalysis>(F);
-        DependenceInfo& DI = AM.getResult<DependenceAnalysis>(F);
-        ScalarEvolution& SE = AM.getResult<ScalarEvolutionAnalysis>(F);
-        errs() << "\nAnalizzo la funzione: " << F.getName();
+        DependenceInfo&    DI  = AM.getResult<DependenceAnalysis>(F);
+        ScalarEvolution&   SE  = AM.getResult<ScalarEvolutionAnalysis>(F);
+
+        errs() << "\nAnalizzo la funzione: " << F.getName() << "\n";
 
         if (LI.empty()) {
             errs() << "Nessun loop trovato\n";
+            return PreservedAnalyses::all();
         }
 
+        // Costruisce la worklist degli inner loop ordinati
+        // per posizione nel CFG (BBOrder = ordine IR).
         SmallVector<Loop*, 8> innerLoops;
-
-        for (Loop* loop : LI)
-            for (Loop* L : post_order(loop))
-                // We only handle inner-most loops.
+        for (Loop* TopL : LI)
+            for (Loop* L : post_order(TopL))
                 if (L->isInnermost())
                     innerLoops.push_back(L);
 
         DenseMap<BasicBlock*, unsigned> BBOrder;
-
         unsigned idx = 0;
         for (BasicBlock& BB : F)
             BBOrder[&BB] = idx++;
@@ -185,16 +411,28 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
             return BBOrder[A->getHeader()] < BBOrder[B->getHeader()];
         });
 
+        bool Changed = false;
+
+        // Itera sulle coppie (L0, L1) adiacenti nella worklist.
+        // Se la fusione avviene:
+        //   - L1 viene rimosso dalla worklist
+        //   - i-- permette di ritentare L0 con il nuovo L1
+        // Se un controllo fallisce si passa semplicemente alla
+        // coppia successiva con i++.
         for (int i = 0; i < (int)innerLoops.size() - 1; i++) {
             Loop* L0 = innerLoops[i];
             Loop* L1 = innerLoops[i + 1];
 
             errs() << "\nAnalisi Loop " << i << " e " << i + 1 << "\n";
 
-            // controlla che i 2 loop siano in simplify form
+            // Entrambi devono essere in simplified form —
+            // garantisce preheader, latch e exit unici.
             if (!checkLoopSimplifyForm(L0))
                 continue;
             if (!checkLoopSimplifyForm(L1)) {
+                // L1 non è fusibile con nessuno come candidato
+                // destro: saltiamo anche lui come candidato
+                // sinistro nella prossima iterazione.
                 i++;
                 continue;
             }
@@ -219,10 +457,23 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
                 continue;
             }
 
-            errs() << "Loop " << i << " e " << i + 1 << " possono essere fusi!\n";
+            errs() << "Loop " << i << " e " << i + 1 << " → fusione!\n";
+            fuseLoops(L0, L1);
+
+            // L1 non esiste più come loop separato:
+            // lo rimuoviamo dalla worklist.
+            innerLoops.erase(innerLoops.begin() + i + 1);
+
+            // Ritentiamo L0 (ora loop fuso) con il nuovo i+1.
+            i--;
+
+            Changed = true;
         }
 
-        return PreservedAnalyses::none();
+        // Se non abbiamo modificato nulla, preserviamo tutto.
+        // Altrimenti invalidiamo le analisi dipendenti dal CFG.
+        return Changed ? PreservedAnalyses::none()
+                       : PreservedAnalyses::all();
     }
 
     static bool isRequired() { return true; }
@@ -230,15 +481,16 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
 
 // Registrazione
 extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo llvmGetPassPluginInfo() {
-    return { LLVM_PLUGIN_API_VERSION, "LoopFusionPass", LLVM_VERSION_STRING, [](PassBuilder& PB) {
-                PB.registerPipelineParsingCallback([](StringRef Name,
-                                                      FunctionPassManager& FPM,
-                                                      ArrayRef<PassBuilder::PipelineElement>) {
-                    if (Name == "my-loop-fusion") {
-                        FPM.addPass(LoopFusionPass());
-                        return true;
-                    }
-                    return false;
-                });
-            } };
+    return { LLVM_PLUGIN_API_VERSION, "LoopFusionPass", LLVM_VERSION_STRING,
+             [](PassBuilder& PB) {
+                 PB.registerPipelineParsingCallback(
+                     [](StringRef Name, FunctionPassManager& FPM,
+                        ArrayRef<PassBuilder::PipelineElement>) {
+                         if (Name == "my-loop-fusion") {
+                             FPM.addPass(LoopFusionPass());
+                             return true;
+                         }
+                         return false;
+                     });
+             } };
 }
