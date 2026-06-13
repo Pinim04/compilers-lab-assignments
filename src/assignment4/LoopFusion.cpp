@@ -54,7 +54,7 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
             errs() << "Exit block di L0: " << *ExitL0 << "\n";
             BasicBlock* PreheaderL1 = L1->getLoopPreheader();
             if (!PreheaderL1)
-                PreheaderL1 = L1->getHeader(); // fallback
+                return false; // fallback
 
             errs() << "Preheader block di L1: " << *PreheaderL1 << "\n";
 
@@ -68,25 +68,27 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
                 return isBlockEmpty(ExitL0) && isBlockEmpty(PreheaderL1);
             }
 
-            return true;
+            return false;
         }
 
         if (G0 && G1) {
             errs() << "Check adiacenza: entrambi guarded\n";
             BasicBlock* GB1 = G1->getParent();
-            BasicBlock* FalseSucc = G0->getSuccessor(1); // bypass
-
+            
+            // CALCOLO DINAMICO DEL BYPASS: Se il successore 0 è il Preheader di L0, 
+            // allora il bypass è l'1. Altrimenti è lo 0.
+            BasicBlock* Preheader0 = L0->getLoopPreheader();
+            if (!Preheader0) return false; // Sicurezza topologica
+            BasicBlock* FalseSucc = L0->contains(G0->getSuccessor(0))
+                        ? G0->getSuccessor(1)
+                        : G0->getSuccessor(0);
+                    
             errs() << "Guard block di L1: " << *GB1 << "\n";
-            errs() << "Bypass di G0: " << *FalseSucc << "\n";
+            errs() << "Bypass di G0 (Dinamico): " << *FalseSucc << "\n";
 
             // bypass del guard di L0 == guard block di L1
             if (FalseSucc == GB1) {
-                // Anche l'uscita normale del Loop 0 deve arrivare pulita a L1
-                BasicBlock* ExitL0 = L0->getExitBlock();
-                if (ExitL0 && ExitL0->getSingleSuccessor() == GB1) {
-                    return isBlockEmpty(ExitL0) && isBlockEmpty(GB1);
-                }
-                return false;
+                return true;
             }
 
             // bypass passa per un blocco intermedio prima di GB1
@@ -183,10 +185,8 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
 
                         // controlla la definizione originale dei puntatori
                         if (getUnderlyingObject(Ptr0) != getUnderlyingObject(Ptr1)) {
-                            errs() << "Dipendenza tra array diversi (alias?): " << I0 << " <-> "
-                                   << I1 << "\n";
-                            return true; // non possiamo essere sicuri che siano array diversi,
-                                         // meglio bloccare la fusione per sicurezza
+                            continue; //base diversa, non c'è dipendenza
+
                         }
 
                         const SCEV* S0 = SE.getSCEVAtScope(Ptr0, L0);
@@ -243,6 +243,21 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
         }
     }
 
+    PHINode* findIV(Loop* L, ScalarEvolution& SE) {
+        if (PHINode* IV = L->getCanonicalInductionVariable())
+            return IV;
+        for (PHINode& PN : L->getHeader()->phis()) {
+            const SCEV* S = SE.getSCEV(&PN);
+            if (const SCEVAddRecExpr* AR = dyn_cast<SCEVAddRecExpr>(S))
+                if (AR->getLoop() == L && AR->isAffine())
+                    if (const SCEVConstant* C =
+                        dyn_cast<SCEVConstant>(AR->getStepRecurrence(SE)))
+                        if (C->getValue()->isOne())
+                            return &PN;
+        }
+        return nullptr;
+    }
+
     //=========================================================
     // TRASFORMAZIONE
     // Precondizione: tutte e 4 le condizioni di legalità passate
@@ -250,7 +265,7 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
     // =========================================================
     // TRASFORMAZIONE (La vera Loop Fusion geometrica)
     // =========================================================
-    void fuseLoops(Loop* L0, Loop* L1) {
+    void fuseLoops(Loop* L0, Loop* L1, ScalarEvolution& SE) {
         BasicBlock* H0 = L0->getHeader();
         BasicBlock* Latch0 = L0->getLoopLatch();
         BasicBlock* Exit0 = L0->getExitBlock();
@@ -269,18 +284,15 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
         // =================================================================
         // STEP 0: Unifica le variabili di induzione (RAUW) con Fallback
         // =================================================================
-        PHINode* IV0 = L0->getCanonicalInductionVariable();
-        PHINode* IV1 = L1->getCanonicalInductionVariable();
+        PHINode* IV0 = findIV(L0, SE);
+        PHINode* IV1 = findIV(L1, SE);
 
-        // Se LLVM non le riconosce in automatico, le peschiamo a mano dall'Header
         if (!IV0 || !IV1) {
-            IV0 = dyn_cast<PHINode>(&*H0->begin());
-            IV1 = dyn_cast<PHINode>(&*H1->begin());
+            return;
         }
 
-        if (IV0 && IV1) {
-            IV1->replaceAllUsesWith(IV0);
-        }
+        IV1->replaceAllUsesWith(IV0);
+        
 
         // =================================================================
         // CALCOLO BODY 1: Troviamo il vero inizio del ciclo
@@ -304,9 +316,16 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
                     break;
                 }
             }
+            // Dopo il calcolo di Body1Start nel caso num > 1:
+            if (Body1Start == Latch1){
+                Body1Start = H1;
+            }
         }
 
-        // ... (RAUW, calcolo Body1Start e Pulizia DeadPhis rimangono uguali) ...
+        if (!Body1Start) {
+            errs() << "Errore: non ho trovato il Body di L1!\n";
+            return;
+        }
 
         // =================================================================
         // ESEGUIRE PRIMA DELLO STEP 1: Taglio Intrusi e Latch Morto
@@ -374,16 +393,27 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
             }
         }
 
-        // Aggiornamento PHI di sicurezza su Latch0
+        // Ricolleghiamo anche le PHI: ogni PHI in Latch0 che aveva un incoming da un vecchio predecessore
+        // ora deve avere un incoming da ciascun nuovo predecessore (da Latch1).
+        // Per semplicità, assumiamo che tutte le PHI in Latch0 abbiano un incoming da ciascun vecchio predecessore (altrimenti bisognerebbe gestire i casi mancanti).
         for (PHINode& PN : Latch0->phis()) {
+            // Per ogni vecchio predecessore di Latch0
             for (BasicBlock* OldPred : PredsOfLatch0) {
                 int idx = PN.getBasicBlockIndex(OldPred);
-                if (idx >= 0 && !PredsOfLatch1.empty()) {
-                    PN.setIncomingBlock(idx, PredsOfLatch1[0]);
+                if (idx < 0) continue;
+
+                // Prendi il valore incoming associato al vecchio predecessore
+                Value* IncomingVal = PN.getIncomingValue(idx);
+
+                // Rimuovi il vecchio predecessore dal PHI
+                PN.removeIncomingValue(idx, /*DeletePHIIfEmpty=*/false);
+
+                // Aggiungi un entry per ciascun nuovo predecessore (da Latch1)
+                for (BasicBlock* NewPred : PredsOfLatch1) {
+                    PN.addIncoming(IncomingVal, NewPred);
                 }
             }
         }
-
         // =================================================================
         // STEP 3: L'uscita di L0 punta all'uscita finale (Exit1)
         // =================================================================
@@ -396,11 +426,11 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
             }
 
             for (PHINode& PN : Exit1->phis()) {
-                int idx = PN.getBasicBlockIndex(H1);
+                int idx = PN.getBasicBlockIndex(Exiting1); // Usa chi esce veramente da L1!
                 if (idx >= 0) {
                     PN.setIncomingBlock(idx, Exiting0);
                 }
-            }
+}
         }
 
         // =================================================================
@@ -496,6 +526,11 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
                 continue;
             }
 
+            if (!L0->getLoopLatch() || !L1->getLoopLatch()) {
+                errs() << "Loop senza latch unico, fusione abortita\n";
+                continue;
+            }
+
             if (!areAdjacent(L0, L1)) {
                 errs() << "Loop non adiacenti\n";
                 continue;
@@ -503,6 +538,14 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
 
             if (!isCFEquivalent(L0, L1, DT, PDT)) {
                 errs() << "Loop non CF-equivalenti\n";
+                continue;
+            }
+
+            // Richiediamo che entrambi i loop abbiano un'unica uscita (e quindi un unico exiting block).
+            //haveSameTripCount potrebbe essere sufficiente per garantire che i loop abbiano lo stesso numero di iterazioni,
+            //ma se ci sono uscite multiple (early exits) la fusione diventa molto più complessa e rischiosa, quindi preferiamo richiedere un'unica uscita per semplicità.
+            if (!L0->getExitingBlock() || !L1->getExitingBlock()) {
+                errs() << "Loop con uscite interne multiple (early exits), fusione abortita\n";
                 continue;
             }
 
@@ -517,11 +560,16 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
             }
 
             errs() << "Loop " << i << " e " << i + 1 << " → fusione!\n";
-            fuseLoops(L0, L1);
+            fuseLoops(L0, L1, SE);
 
             // L1 non esiste più come loop separato:
             // lo rimuoviamo dalla worklist.
             innerLoops.erase(innerLoops.begin() + i + 1);
+            DT.recalculate(F);
+            PDT.recalculate(F);
+
+
+
 
             // Ritentiamo L0 (ora loop fuso) con il nuovo i+1.
             i--;
