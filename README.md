@@ -29,6 +29,10 @@ From the `build` directory, run LLVM `opt` with the pass plugin:
 | `src/assignment1/MultiInst.cpp`   | `multi-inst`       | `./lib/libMultiInst.so`   | `../test/test_MultiInst.ll`   | `opt -S -load-pass-plugin ./lib/libMultiInst.so -p multi-inst ../test/test_MultiInst.ll`                    |
 | `src/assignment1/StrengthRed.cpp` | `strength-red`     | `./lib/libStrengthRed.so` | `../test/test_StrengthRed.ll` | `opt -S -load-pass-plugin ./lib/libStrengthRed.so -p strength-red ../test/test_StrengthRed.ll`              |
 | `src/assignment3/CodeMotion.cpp`  | `code-motion`      | `./lib/libCodeMotion.so`  | `../test/test_CodeMotion.ll`  | `opt -S -load-pass-plugin ./lib/libCodeMotion.so -p "loop-simplify,code-motion" ../test/test_CodeMotion.ll` |
+| `src/assignment4/LoopFusion.cpp`  | `my-loop-fusion`      | `./lib/libLoopFusion.so`  | `../test/test_LoopFusion.ll`  | `opt -S -load-pass-plugin ./lib/libLoopFusion.so -p "my-loop-fusion" ../test/test_LoopFusion.ll` |
+
+> [!IMPORTANT]
+> To fully test LoopFusion add `loop-simplify` and `loop-rotate` as additional passes BEFORE `my-loop-fusion`
 
 Example:
 
