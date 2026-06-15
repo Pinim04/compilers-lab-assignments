@@ -574,9 +574,9 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
                 }
             }
 
-            // Prima rimuoviamo tutte le referenze ai blocchi, altrimenti potremmo avere problemi di iterator invalidation
-            //Per refererenze intendo ad esempio i PHI node che hanno come incoming block un blocco morto, o le istruzioni
-            // di terminazione che hanno come successore un blocco morto.
+            // Prima rimuoviamo tutte le referenze ai blocchi
+            //-referenze come phi node che hanno come incoming un blocco morto
+            //-referenze come terminatori che hanno come successore un blocco morto
             for (BasicBlock* BB : DeadBlocks) {
                 BB->dropAllReferences();
             }
@@ -584,7 +584,7 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
                 BB->eraseFromParent();
             }
 
-            // Ricalcola dopo la pulizia
+            // Ricalcolo dopo la pulizia
             DT.recalculate(F);
             PDT.recalculate(F);
 
