@@ -9,7 +9,7 @@
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
 #include "llvm/Support/raw_ostream.h"
-#include <llvm-19/llvm/Transforms/Utils/LoopUtils.h>
+#include <llvm/Transforms/Utils/LoopUtils.h>
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/Support/Casting.h>
@@ -566,6 +566,25 @@ struct LoopFusionPass : PassInfoMixin<LoopFusionPass>
             }
             innerLoops.erase(innerLoops.begin() + i + 1);
 
+            // Elimina i blocchi irraggiungibili
+            SmallVector<BasicBlock*, 8> DeadBlocks;
+            for (BasicBlock& BB : F) {
+                if (pred_empty(&BB) && &BB != &F.getEntryBlock()) {
+                    DeadBlocks.push_back(&BB);
+                }
+            }
+
+            // Prima rimuoviamo tutte le referenze ai blocchi, altrimenti potremmo avere problemi di iterator invalidation
+            //Per refererenze intendo ad esempio i PHI node che hanno come incoming block un blocco morto, o le istruzioni
+            // di terminazione che hanno come successore un blocco morto.
+            for (BasicBlock* BB : DeadBlocks) {
+                BB->dropAllReferences();
+            }
+            for (BasicBlock* BB : DeadBlocks) {
+                BB->eraseFromParent();
+            }
+
+            // Ricalcola dopo la pulizia
             DT.recalculate(F);
             PDT.recalculate(F);
 
