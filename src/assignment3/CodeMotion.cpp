@@ -11,8 +11,6 @@ using namespace llvm;
 
 struct CodeMotionPass : PassInfoMixin<CodeMotionPass>
 {
-    std::set<Instruction*> Visited;
-
     // estrazione dei loop in postorder
     void getLoopsPostorder(Loop* L, std::vector<Loop*>& PostOrderLoops) {
         for (Loop* SubLoop : *L) {
@@ -27,7 +25,6 @@ struct CodeMotionPass : PassInfoMixin<CodeMotionPass>
     // Un'istruzione è loop invariant se tutti i suoi operandi
     // sono costanti, argomenti, definiti fuori dal loop,
     // oppure a loro volta loop invariant (ricorsione).
-    // Usiamo Visited per evitare ricorsione infinita sui PHI node.
     bool isOpLoopInvariant(Value* Op, Loop* L) {
         // const
         if (Constant* C = dyn_cast<Constant>(Op)) {
@@ -60,19 +57,12 @@ struct CodeMotionPass : PassInfoMixin<CodeMotionPass>
             return false;
         }
 
-        if (Visited.count(&I))
-            return false; // Serve per evitare cicli infiniti
-                          // potrebbe esserci un ciclo di dipendenze
-
-        Visited.insert(&I);
         for (auto& Op : I.operands()) {
             if (!isOpLoopInvariant(Op.get(), L)) {
-                Visited.erase(&I);
                 return false;
             }
         }
 
-        Visited.erase(&I);
         return true;
     }
 
@@ -212,7 +202,6 @@ struct CodeMotionPass : PassInfoMixin<CodeMotionPass>
                     errs() << "\nIstruzione: " << I << "\n";
 
                     // loop invariant
-                    Visited.clear();
                     if (!isInstLoopInvariant(I, L)) {
                         errs() << "Non loop invariant\n";
                         continue;
