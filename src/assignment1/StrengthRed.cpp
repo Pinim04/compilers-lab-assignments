@@ -92,16 +92,16 @@ struct StrengthRed : PassInfoMixin<StrengthRed>
                         ConstantInt* C1 = dyn_cast<ConstantInt>(Op1);
                         uint64_t shift = 0;
                         if (C0) {
-                            int x = checkShift(C0, shift);
-                            if (x != 0) {
-                                Changed = optimizeMul(BinOp, Op1, shift, InstToRemove, x);
+                            int check = checkShift(C0, shift);
+                            if (check != 0) {
+                                Changed = optimizeMul(BinOp, Op1, shift, InstToRemove, check);
                                 continue;
                             }
                         }
                         if (C1) {
-                            int x = checkShift(C1, shift);
-                            if (x != 0) {
-                                Changed = optimizeMul(BinOp, Op0, shift, InstToRemove, x);
+                            int check = checkShift(C1, shift);
+                            if (check != 0) {
+                                Changed = optimizeMul(BinOp, Op0, shift, InstToRemove, check);
                                 continue;
                             }
                         }
@@ -113,8 +113,8 @@ struct StrengthRed : PassInfoMixin<StrengthRed>
                         uint64_t shift = 0;
 
                         if (C1) {
-                            int x = checkShift(C1, shift);
-                            if (x == 1) {
+                            int check = checkShift(C1, shift);
+                            if (check == 1) {
                                 Changed = optimizeDiv(BinOp, Op0, shift, InstToRemove);
                                 continue;
                             }
